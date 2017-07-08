@@ -18,6 +18,7 @@
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 #
 import fcntl
+import hashlib
 import os
 import pipes
 import pty
@@ -50,25 +51,22 @@ class Connection(ConnectionBase):
     transport = 'lxc_ssh'
 
     def __init__(self, play_context, new_stdin, *args, **kwargs):
-        #print args
-        #print kwargs
         super(Connection, self).__init__(play_context, new_stdin, *args, **kwargs)
-        self.host=self._play_context.remote_addr
+        self.host = self._play_context.remote_addr
         self.lxc_version = None
 
         # LXC v1 uses 'lxc-info', 'lxc-attach' and so on
         # LXC v2 uses just 'lxc'
         (returncode2, stdout2, stderr2) = self._exec_command("which lxc", None, False)
         (returncode1, stdout1, stderr1) = self._exec_command("which lxc-info", None, False)
-        if (returncode2 == 0):
+        if returncode2 == 0:
             self.lxc_version = 2
             display.vvv('LXC v2')
-        elif (returncode1 == 0):
+        elif returncode1 == 0:
             self.lxc_version = 2
             display.vvv('LXC v1')
         else:
             raise AnsibleConnectionFailure('Cannot identify LXC version')
-            sys.exit(1)
 
 
     def _connect(self):
@@ -78,6 +76,16 @@ class Connection(ConnectionBase):
         #self.container_name = self.ssh._play_context.remote_addr
         self.container_name = self._play_context.ssh_extra_args # XXX
         #self.container = None
+
+    @staticmethod
+    def _create_control_path(host, port, user):
+        '''Make a hash for the controlpath based on con attributes'''
+        pstring = '%s-%s-%s' % (host, port, user)
+        m = hashlib.sha1()
+        m.update(to_bytes(pstring))
+        digest = m.hexdigest()
+        cpath = '%(directory)s/' + digest[:10]
+        return cpath
 
     @staticmethod
     def _persistence_controls(command):
@@ -175,13 +183,20 @@ class Connection(ConnectionBase):
         if controlpersist:
             self._persistent = True
             if not controlpath:
-                cpdir = unfrackpath('$HOME/.ansible/cp')
+                cpdir = unfrackpath(C.ANSIBLE_SSH_CONTROL_PATH_DIR)
                 # The directory must exist and be writable.
                 makedirs_safe(cpdir, 0o700)
                 if not os.access(cpdir, os.W_OK):
                     raise AnsibleError("Cannot write to ControlPath %s" % cpdir)
+                control_path = C.ANSIBLE_SSH_CONTROL_PATH
+                if not control_path:
+                    control_path = self._create_control_path(
+                        self.host,
+                        self._play_context.port,
+                        self._play_context.remote_user
+                    )
                 args = ("-o", "ControlPath={0}".format(
-                    to_bytes(C.ANSIBLE_SSH_CONTROL_PATH % dict(directory=cpdir)))
+                    to_bytes(control_path % dict(directory=cpdir)))
                 )
                 self._add_args("found only ControlPersist; added ControlPath", args)
         ## Finally, we add any caller-supplied extras.
@@ -542,13 +557,6 @@ class Connection(ConnectionBase):
         ''' run a command on the chroot '''
         display.vvv('XXX exec_command: %s' % cmd)
         super(Connection, self).exec_command(cmd, in_data=in_data, sudoable=sudoable)
-        ##print dir(self)
-        ##print dir(self._play_context)
-        ##print self._play_context._attributes
-        #self.dir_print(self._play_context)
-        #vm = self._play_context.get_ds()
-        #print( vm )
-        #raise "blah"
         h = self.container_name
         if (self.lxc_version == 2):
             lxc_cmd = 'lxc exec %s --mode=non-interactive -- /bin/sh -c %s'  \
@@ -562,7 +570,6 @@ class Connection(ConnectionBase):
             cmd = self._build_command('ssh', self.host, lxc_cmd)
         else:
             cmd = self._build_command('ssh', '-tt', self.host, lxc_cmd)
-        #self.ssh.exec_command(lxc_cmd,in_data,sudoable)
         (returncode, stdout, stderr) = self._run(cmd, in_data, sudoable=sudoable)
         return (returncode, stdout, stderr)
 
@@ -578,11 +585,11 @@ class Connection(ConnectionBase):
             in_data = in_f.read()
             cmd = ('cat > %s; echo -n done' % pipes.quote(out_path))
             h = self.container_name
-            if (self.lxc_version == 2):
+            if self.lxc_version == 2:
                 lxc_cmd = 'lxc exec %s --mode=non-interactive -- /bin/sh -c %s'  \
                         % (pipes.quote(h),
                            pipes.quote(cmd))
-            elif (self.lxc_version == 1):
+            elif self.lxc_version == 1:
                 lxc_cmd = 'lxc-attach --name %s -- /bin/sh -c %s'  \
                         % (pipes.quote(h),
                            pipes.quote(cmd))
@@ -600,11 +607,11 @@ class Connection(ConnectionBase):
         super(Connection, self).fetch_file(in_path, out_path)
         cmd = ('cat %s' % pipes.quote(in_path))
         h = self.container_name
-        if (self.lxc_version == 2):
+        if self.lxc_version == 2:
             lxc_cmd = 'lxc exec %s --mode=non-interactive -- /bin/sh -c %s'  \
                     % (pipes.quote(h),
                        pipes.quote(cmd))
-        elif (self.lxc_version == 1):
+        elif self.lxc_version == 1:
             lxc_cmd = 'lxc-attach --name %s -- /bin/sh -c %s'  \
                     % (pipes.quote(h),
                        pipes.quote(cmd))
